@@ -18,6 +18,14 @@ const {
 const STORAGE_KEY = "trek-prep-challenge-v1";
 const DEVICE_KEY = "trek-prep-device-key";
 const app = document.getElementById("app");
+const EMPTY_STATE = { groups: [], participants: [], logs: [], totals: [] };
+const CLOUD_COLLECTIONS = {
+  groups: "trekPrepGroups",
+  admins: "trekPrepAdmins",
+  participants: "trekPrepParticipants",
+  logs: "trekPrepLogs",
+  totals: "trekPrepTotals",
+};
 
 const activityMeta = {
   steps: { label: "Steps", unit: "steps", helper: "Enter new steps since last log", icon: "shoe", max: 200000 },
@@ -35,23 +43,152 @@ const statusLabels = {
   RED_CIRCLE: "Red Circle",
 };
 
-let state = readState();
+let state = { ...EMPTY_STATE };
+let cloudDb = null;
+let storageMode = "local";
 let activeTab = "my";
 let selectedWeek = getDefaultSelectedWeek();
 let selectedTrailWeek = null;
 
 function readState() {
   const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return { groups: [], participants: [], logs: [], totals: [] };
+  if (!raw) return { ...EMPTY_STATE };
   try {
-    return JSON.parse(raw);
+    return normalizeState(JSON.parse(raw));
   } catch {
-    return { groups: [], participants: [], logs: [], totals: [] };
+    return { ...EMPTY_STATE };
   }
 }
 
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function normalizeState(nextState) {
+  return {
+    groups: Array.isArray(nextState.groups) ? nextState.groups : [],
+    participants: Array.isArray(nextState.participants) ? nextState.participants : [],
+    logs: Array.isArray(nextState.logs) ? nextState.logs : [],
+    totals: Array.isArray(nextState.totals) ? nextState.totals : [],
+  };
+}
+
+function isFirebaseConfigured() {
+  const firebaseSettings = window.TREK_FIREBASE;
+  return Boolean(
+    firebaseSettings &&
+      firebaseSettings.enabled &&
+      firebaseSettings.config &&
+      firebaseSettings.config.apiKey &&
+      !String(firebaseSettings.config.apiKey).startsWith("PASTE_") &&
+      window.firebase &&
+      window.firebase.firestore
+  );
+}
+
+async function initializeStorage() {
+  state = readState();
+  if (!isFirebaseConfigured()) {
+    storageMode = "local";
+    return;
+  }
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(window.TREK_FIREBASE.config);
+    cloudDb = firebase.firestore();
+    storageMode = "cloud";
+    await loadCloudState();
+    saveState();
+  } catch (error) {
+    console.warn("Firebase unavailable, falling back to local storage.", error);
+    cloudDb = null;
+    storageMode = "local";
+  }
+}
+
+async function loadCloudState() {
+  const localState = readState();
+  const query = params();
+  const publicSlug = query.get("g");
+  const adminToken = query.get("admin");
+  if (adminToken) {
+    const adminDoc = await cloudDb.collection(CLOUD_COLLECTIONS.admins).doc(adminToken).get();
+    if (!adminDoc.exists) {
+      state = localState;
+      return;
+    }
+    await loadCloudGroupBundle(adminDoc.data().groupId, adminToken);
+    return;
+  }
+  if (publicSlug) {
+    await loadCloudGroupBundle(publicSlug, null);
+    return;
+  }
+  state = localState;
+}
+
+async function loadCloudGroupBundle(groupId, adminToken) {
+  const groupDoc = await cloudDb.collection(CLOUD_COLLECTIONS.groups).doc(groupId).get();
+  if (!groupDoc.exists) {
+    state = { ...EMPTY_STATE };
+    return;
+  }
+  const [participants, logs, totals] = await Promise.all([
+    readCloudCollection(CLOUD_COLLECTIONS.participants, groupId),
+    readCloudCollection(CLOUD_COLLECTIONS.logs, groupId),
+    readCloudCollection(CLOUD_COLLECTIONS.totals, groupId),
+  ]);
+  const group = groupDoc.data();
+  if (adminToken) group.adminToken = adminToken;
+  state = normalizeState({ groups: [group], participants, logs, totals });
+}
+
+async function readCloudCollection(collectionName, groupId) {
+  const snapshot = await cloudDb.collection(collectionName).where("groupId", "==", groupId).get();
+  return snapshot.docs.map((doc) => doc.data());
+}
+
+async function saveRecord(collectionName, record) {
+  saveState();
+  if (!cloudDb) return;
+  await cloudDb.collection(collectionName).doc(record.id).set(cleanRecord(collectionName, record));
+}
+
+async function saveAdminToken(group) {
+  saveState();
+  if (!cloudDb || !group.adminToken) return;
+  await cloudDb.collection(CLOUD_COLLECTIONS.admins).doc(group.adminToken).set({
+    groupId: group.id,
+    createdAt: group.createdAt || new Date().toISOString(),
+  });
+}
+
+async function deleteRecords(collectionName, records) {
+  saveState();
+  if (!cloudDb || !records.length) return;
+  const batch = cloudDb.batch();
+  records.forEach((record) => {
+    batch.delete(cloudDb.collection(collectionName).doc(record.id));
+  });
+  await batch.commit();
+}
+
+function cleanRecord(collectionName, record) {
+  const cleaned = JSON.parse(JSON.stringify(record));
+  if (collectionName === CLOUD_COLLECTIONS.groups) delete cleaned.adminToken;
+  return cleaned;
+}
+
+function renderLoading() {
+  app.innerHTML = `
+    <section class="hero">
+      ${logoMarkup()}
+      <div class="hero-copy">
+        <p class="eyebrow">Loading camp</p>
+        <h1>Trek Prep Challenge</h1>
+        <p class="subtle">Connecting to shared group data.</p>
+      </div>
+    </section>
+  `;
 }
 
 function getDeviceKey() {
@@ -164,6 +301,7 @@ function renderAdminCreate(context) {
         <p class="eyebrow">Organiser setup</p>
         <h1>Trek Prep Challenge</h1>
         <p class="subtle">Create an independent 12-week prep camp with its own public participant link and private snapshot link.</p>
+        <p class="subtle">${storageStatusText()}</p>
       </div>
     </section>
     ${missingLinkMessage}
@@ -182,7 +320,7 @@ function renderAdminCreate(context) {
   bindCopyButtons();
 }
 
-function createGroup(event) {
+async function createGroup(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const startDate = form.get("startDate");
@@ -191,19 +329,21 @@ function createGroup(event) {
     message.innerHTML = `<div class="notice error">Please select a Monday start date so the 12-week plan runs cleanly Monday to Sunday.</div>`;
     return;
   }
+  const publicSlug = makeSlug(form.get("name"));
   const group = {
-    id: makeId("group"),
+    id: publicSlug,
     name: form.get("name").trim(),
     trekName: form.get("trekName").trim(),
     description: form.get("description").trim(),
     startDate,
     createdAt: new Date().toISOString(),
-    publicSlug: makeSlug(form.get("name")),
+    publicSlug,
     adminToken: makeId("admin").replace(/_/g, "-"),
     isActive: true,
   };
   state.groups.push(group);
-  saveState();
+  await saveRecord(CLOUD_COLLECTIONS.groups, group);
+  await saveAdminToken(group);
   const links = getGroupLinks(group);
   message.innerHTML = `
     <div class="notice">Group created. Share the public link with participants and keep the admin link private.</div>
@@ -223,11 +363,12 @@ function createGroup(event) {
 
 function getGroupLinks(group) {
   const base = `${location.origin}${location.pathname}`;
+  const adminToken = group.adminToken || params().get("admin") || "";
   return {
     publicHref: `?g=${encodeURIComponent(group.publicSlug)}`,
-    adminHref: `?admin=${encodeURIComponent(group.adminToken)}`,
+    adminHref: `?admin=${encodeURIComponent(adminToken)}`,
     publicLink: `${base}?g=${encodeURIComponent(group.publicSlug)}`,
-    adminLink: `${base}?admin=${encodeURIComponent(group.adminToken)}`,
+    adminLink: `${base}?admin=${encodeURIComponent(adminToken)}`,
   };
 }
 
@@ -265,7 +406,7 @@ function renderJoin(context, programStatus) {
   document.getElementById("joinForm").addEventListener("submit", joinGroup);
 }
 
-function joinGroup(event) {
+async function joinGroup(event) {
   event.preventDefault();
   const context = currentContext();
   const displayName = new FormData(event.currentTarget).get("displayName").trim();
@@ -285,7 +426,12 @@ function joinGroup(event) {
   state.participants.push(participant);
   localStorage.setItem(`trek-prep-participant-${context.group.id}`, participant.id);
   ensureTotalsForParticipant(context.group, participant.id);
-  saveState();
+  await saveRecord(CLOUD_COLLECTIONS.participants, participant);
+  await Promise.all(
+    state.totals
+      .filter((total) => total.groupId === context.group.id && total.participantId === participant.id)
+      .map((total) => saveRecord(CLOUD_COLLECTIONS.totals, total))
+  );
   activeTab = "my";
   render();
 }
@@ -354,6 +500,7 @@ function renderAdminSetup(context, programStatus) {
     <section class="card">
       <h2>Group Settings</h2>
       <p class="subtle">Edit the camp details before sharing the participant link widely.</p>
+      <p class="subtle">${storageStatusText()}</p>
       ${context.group.testModeEnabled ? `<div class="notice">Testing mode is on. The public camp behaves as active Week 1 today, even if the official start date is later.</div>` : ""}
       <form id="adminSettingsForm">
         <label class="field"><span>Group name</span><input name="name" required maxlength="80" value="${escapeHtml(context.group.name)}" /></label>
@@ -392,7 +539,13 @@ function renderAdminSetup(context, programStatus) {
   bindCopyButtons();
 }
 
-function saveAdminSettings(event) {
+function storageStatusText() {
+  return storageMode === "cloud"
+    ? "Database: shared Firebase Firestore"
+    : "Database: local browser storage until Firebase config is added";
+}
+
+async function saveAdminSettings(event) {
   event.preventDefault();
   const context = currentContext();
   const form = new FormData(event.currentTarget);
@@ -416,7 +569,12 @@ function saveAdminSettings(event) {
       total.weekEndDate = range.weekEndDate;
       updateWeeklyComputedFields(context.group, total);
     });
-  saveState();
+  await saveRecord(CLOUD_COLLECTIONS.groups, context.group);
+  await Promise.all(
+    state.totals
+      .filter((total) => total.groupId === context.group.id)
+      .map((total) => saveRecord(CLOUD_COLLECTIONS.totals, total))
+  );
   render();
   setTimeout(() => {
     const freshMessage = document.getElementById("settingsMessage");
@@ -424,15 +582,23 @@ function saveAdminSettings(event) {
   }, 0);
 }
 
-function resetGroupData() {
+async function resetGroupData() {
   const context = currentContext();
   if (!confirm("Reset this group's roster, logs, and weekly totals? Group settings and links will stay unchanged.")) return;
+  const removedParticipants = state.participants.filter((participant) => participant.groupId === context.group.id);
+  const removedLogs = state.logs.filter((log) => log.groupId === context.group.id);
+  const removedTotals = state.totals.filter((total) => total.groupId === context.group.id);
   state.participants = state.participants.filter((participant) => participant.groupId !== context.group.id);
   state.logs = state.logs.filter((log) => log.groupId !== context.group.id);
   state.totals = state.totals.filter((total) => total.groupId !== context.group.id);
   localStorage.removeItem(`trek-prep-participant-${context.group.id}`);
   selectedTrailWeek = null;
   saveState();
+  await Promise.all([
+    deleteRecords(CLOUD_COLLECTIONS.participants, removedParticipants),
+    deleteRecords(CLOUD_COLLECTIONS.logs, removedLogs),
+    deleteRecords(CLOUD_COLLECTIONS.totals, removedTotals),
+  ]);
   render();
   setTimeout(() => {
     const message = document.getElementById("resetMessage");
@@ -490,7 +656,7 @@ function activityRowMarkup(key, totals, targets) {
   `;
 }
 
-function saveLog(event) {
+async function saveLog(event) {
   event.preventDefault();
   const context = currentContext();
   const programStatus = getProgramStatus(context.group.startDate, effectiveToday(context.group));
@@ -514,7 +680,7 @@ function saveLog(event) {
     const totalIncrement = ACTIVITY_KEYS.reduce((sum, key) => sum + increments[key], 0);
     if (totalIncrement === 0 && !confirm("All increments are zero. Save this log anyway?")) return;
 
-    state.logs.push({
+    const log = {
       id: makeId("log"),
       groupId: context.group.id,
       participantId: context.participant.id,
@@ -524,11 +690,13 @@ function saveLog(event) {
       stairsIncrement: increments.stairs,
       yogaIncrement: increments.yoga,
       pranayamaIncrement: increments.pranayama,
-    });
+    };
+    state.logs.push(log);
     const total = getWeeklyTotal(context.group.id, context.participant.id, weekNumber);
     Object.assign(total, applyLogIncrement(total, increments, weekNumber));
     updateWeeklyComputedFields(context.group, total);
-    saveState();
+    await saveRecord(CLOUD_COLLECTIONS.logs, log);
+    await saveRecord(CLOUD_COLLECTIONS.totals, total);
     selectedTrailWeek = weekNumber;
     render();
     setTimeout(() => {
@@ -888,4 +1056,10 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-render();
+async function boot() {
+  renderLoading();
+  await initializeStorage();
+  render();
+}
+
+boot();
