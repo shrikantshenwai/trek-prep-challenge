@@ -1083,7 +1083,7 @@ function activityRowMarkup(key, totals, targets) {
     <div class="activity-row">
       <div class="activity-head">
         <div>
-          <div class="activity-title"><span class="glyph">${activityGlyph(meta.icon)}</span>${meta.label}</div>
+          <div class="activity-title"><span class="glyph">+</span>${meta.label}</div>
           <div class="subtle">${numberFormat(actual)} ${meta.unit} logged - baseline ${numberFormat(baseline)} - stretch ${numberFormat(stretch)}</div>
         </div>
         <strong>${Math.round(percent)}%</strong>
@@ -1460,10 +1460,6 @@ function legendMarkup() {
 
 function legendItem(status, description) {
   return `<div class="legend-item">${statusIcon(status)}<div><strong>${statusLabels[status]}</strong><br><span class="subtle">${description}</span></div></div>`;
-}
-
-function activityGlyph() {
-  return "+";
 }
 
 function classLabel(value) {
