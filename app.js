@@ -484,8 +484,10 @@ function renderJoin(context, programStatus) {
   const participants = getParticipantsForGroup(context.group.id);
   const participantButtons = participants.length
     ? `
-      <div class="roster-claim-list">
-        <p class="subtle">Already joined? Continue as your roster name instead of joining again.</p>
+      <section class="card">
+        <h2>Already Joined?</h2>
+        <p class="subtle">Tap your name below to continue. Do not enter your name again if you are already listed here.</p>
+        <div class="roster-claim-list">
         ${participants
           .map(
             (participant) => `
@@ -495,7 +497,8 @@ function renderJoin(context, programStatus) {
             `
           )
           .join("")}
-      </div>
+        </div>
+      </section>
     `
     : "";
   app.innerHTML = `
@@ -515,12 +518,12 @@ function renderJoin(context, programStatus) {
         <div class="detail-row"><span>Program status</span><span class="pill">${programStatus.label}</span></div>
       </div>
     </section>
+    ${participantButtons}
     <form class="card" id="joinForm">
-      <h2>Join Camp</h2>
+      <h2>New Users</h2>
+      <p class="subtle">If your name is not listed above, enter your name here.</p>
       <label class="field"><span>Your display name</span><input name="displayName" required maxlength="50" autocomplete="name" placeholder="Rajiv" /></label>
       <button class="button" type="submit">Join Camp</button>
-      ${participants.length ? `<p class="subtle">Already on roster: ${participants.slice(0, 5).map((p) => escapeHtml(p.displayName)).join(", ")}${participants.length > 5 ? "..." : ""}</p>` : ""}
-      ${participantButtons}
       <div id="joinMessage"></div>
     </form>
     <section class="card">
@@ -1459,14 +1462,8 @@ function legendItem(status, description) {
   return `<div class="legend-item">${statusIcon(status)}<div><strong>${statusLabels[status]}</strong><br><span class="subtle">${description}</span></div></div>`;
 }
 
-function activityGlyph(name) {
-  const glyphs = {
-    shoe: "+",
-    stairs: "#",
-    lotus: "o",
-    breath: "~",
-  };
-  return glyphs[name];
+function activityGlyph() {
+  return "+";
 }
 
 function classLabel(value) {
