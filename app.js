@@ -332,6 +332,12 @@ function renderAdminCreate(context) {
       </div>
     </section>
     ${missingLinkMessage}
+    <section class="card start-here-card">
+      <h2>Your Start Here Page</h2>
+      <p class="subtle">Bookmark this organiser dashboard for yourself. Use it to manage groups, copy links, reset test data, or jump into your own participant view.</p>
+      <div class="link-box">${getAdminDashboardLink()}</div>
+      <button class="button ghost" type="button" data-copy="${encodeURIComponent(getAdminDashboardLink())}">Copy My Admin Dashboard Link</button>
+    </section>
     ${existingGroups}
     <form class="card" id="createGroupForm">
       <h2>Create New Prep Group</h2>
@@ -378,7 +384,7 @@ function existingGroupMarkup(group) {
       <div class="link-box">${links.publicLink}</div>
       ${links.adminLink ? `<strong>Admin/manage link</strong><div class="link-box">${links.adminLink}</div>` : ""}
       <div class="button-row">
-        <a class="button secondary" href="${links.publicHref}">Open Public Camp</a>
+        <a class="button secondary" href="${links.publicHref}">Open My Status</a>
         <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.publicLink)}">Copy Public Link</button>
         ${adminActions}
       </div>
@@ -443,6 +449,10 @@ function getGroupLinks(group) {
     publicLink: `${base}?g=${encodeURIComponent(group.publicSlug)}`,
     adminLink: adminQuery ? `${base}${adminQuery}` : "",
   };
+}
+
+function getAdminDashboardLink() {
+  return `${location.origin}${location.pathname}?admin=1`;
 }
 
 function renderJoin(context, programStatus) {
@@ -589,15 +599,15 @@ function renderAdminSetup(context, programStatus) {
       </form>
     </section>
     <section class="card">
-      <h2>Share Links</h2>
+      <h2>Your Links</h2>
       <div class="details">
-        <strong>Public group link</strong>
+        <strong>For everyone else: public participant link</strong>
         <div class="link-box">${links.publicLink}</div>
-        <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.publicLink)}">Copy public link</button>
-        <a class="button secondary" href="${links.publicHref}">Open public camp</a>
-        <strong>Admin link</strong>
+        <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.publicLink)}">Copy Public Link</button>
+        <a class="button secondary" href="${links.publicHref}">Open My Status</a>
+        <strong>For you only: private admin/manage link</strong>
         <div class="link-box">${links.adminLink}</div>
-        <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.adminLink)}">Copy admin link</button>
+        <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.adminLink)}">Copy Admin Link</button>
       </div>
     </section>
     <section class="card danger-zone">
