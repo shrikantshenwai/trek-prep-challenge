@@ -1,4 +1,4 @@
-const {
+﻿const {
   ACTIVITY_CLASSES,
   WEEKLY_STATUSES,
   ACTIVITY_KEYS,
@@ -109,21 +109,22 @@ async function loadCloudState() {
   const localState = readState();
   const query = params();
   const publicSlug = query.get("g");
-  const adminToken = query.get("admin");
+  const adminRoute = getAdminRoute(query);
+  const adminToken = adminRoute.token;
   if (adminToken) {
     const adminDoc = await cloudDb.collection(CLOUD_COLLECTIONS.admins).doc(adminToken).get();
     if (!adminDoc.exists) {
       state = localState;
       return;
     }
-    await loadCloudGroupBundle(adminDoc.data().groupId, adminToken);
+    await loadCloudGroupBundle(adminRoute.groupId || adminDoc.data().groupId, adminToken);
     return;
   }
   if (publicSlug) {
     await loadCloudGroupBundle(publicSlug, null);
     return;
   }
-  state = localState;
+  await loadCloudDashboard(localState);
 }
 
 async function loadCloudGroupBundle(groupId, adminToken) {
@@ -142,8 +143,38 @@ async function loadCloudGroupBundle(groupId, adminToken) {
   state = normalizeState({ groups: [group], participants, logs, totals });
 }
 
+async function loadCloudDashboard(localState) {
+  const [groupsSnapshot, adminTokens, participants, logs, totals] = await Promise.all([
+    cloudDb.collection(CLOUD_COLLECTIONS.groups).get(),
+    readCloudAdminTokens(),
+    readCloudCollection(CLOUD_COLLECTIONS.participants),
+    readCloudCollection(CLOUD_COLLECTIONS.logs),
+    readCloudCollection(CLOUD_COLLECTIONS.totals),
+  ]);
+  const localTokens = new Map(localState.groups.map((group) => [group.id, group.adminToken]).filter((entry) => entry[1]));
+  const cloudTokens = new Map(adminTokens.map((admin) => [admin.groupId, admin.token]).filter((entry) => entry[0] && entry[1]));
+  const groups = groupsSnapshot.docs.map((doc) => {
+    const group = doc.data();
+    if (!group.adminToken && cloudTokens.has(group.id)) group.adminToken = cloudTokens.get(group.id);
+    if (!group.adminToken && localTokens.has(group.id)) group.adminToken = localTokens.get(group.id);
+    return group;
+  });
+  state = normalizeState({ groups, participants, logs, totals });
+}
+
+async function readCloudAdminTokens() {
+  try {
+    const snapshot = await cloudDb.collection(CLOUD_COLLECTIONS.admins).get();
+    return snapshot.docs.map((doc) => ({ token: doc.id, ...doc.data() }));
+  } catch (error) {
+    console.warn("Admin token list unavailable until Firestore rules are published.", error);
+    return [];
+  }
+}
+
 async function readCloudCollection(collectionName, groupId) {
-  const snapshot = await cloudDb.collection(collectionName).where("groupId", "==", groupId).get();
+  const ref = cloudDb.collection(collectionName);
+  const snapshot = groupId ? await ref.where("groupId", "==", groupId).get() : await ref.get();
   return snapshot.docs.map((doc) => doc.data());
 }
 
@@ -174,7 +205,6 @@ async function deleteRecords(collectionName, records) {
 
 function cleanRecord(collectionName, record) {
   const cleaned = JSON.parse(JSON.stringify(record));
-  if (collectionName === CLOUD_COLLECTIONS.groups) delete cleaned.adminToken;
   return cleaned;
 }
 
@@ -218,16 +248,27 @@ function params() {
   return new URLSearchParams(window.location.search);
 }
 
+function getAdminRoute(query = params()) {
+  const adminValue = query.get("admin");
+  const token = query.get("token") || (adminValue && adminValue !== "1" ? adminValue : "");
+  return {
+    dashboard: adminValue === "1" && !token && !query.get("group"),
+    groupId: query.get("group") || "",
+    token,
+  };
+}
+
 function currentContext() {
   const query = params();
   const publicSlug = query.get("g");
-  const adminToken = query.get("admin");
+  const adminRoute = getAdminRoute(query);
+  const adminToken = adminRoute.token;
   const group = adminToken
-    ? state.groups.find((item) => item.adminToken === adminToken)
+    ? state.groups.find((item) => item.adminToken === adminToken && (!adminRoute.groupId || item.id === adminRoute.groupId))
     : state.groups.find((item) => item.publicSlug === publicSlug);
   const adminMode = Boolean(adminToken && group);
   const participant = group && !adminMode ? findReturningParticipant(group.id) : null;
-  return { publicSlug, adminToken, group, adminMode, participant };
+  return { publicSlug, adminToken, adminDashboard: adminRoute.dashboard, requestedGroupId: adminRoute.groupId, group, adminMode, participant };
 }
 
 function findReturningParticipant(groupId) {
@@ -270,43 +311,30 @@ function render() {
 }
 
 function renderAdminCreate(context) {
-  const missingLinkMessage = context.publicSlug || context.adminToken ? `<div class="notice error">That group link was not found on this device.</div>` : "";
+  const missingLinkMessage = context.publicSlug || context.adminToken || context.requestedGroupId ? `<div class="notice error">That group link was not found in the shared database.</div>` : "";
   const existingGroups = state.groups.length
     ? `
       <section class="card">
         <h2>Existing Groups</h2>
-        <p class="subtle">Open admin setup for a saved group on this device.</p>
-        <div class="details">
-          ${state.groups.map((group) => {
-            const links = getGroupLinks(group);
-            return `
-              <div class="saved-group">
-                <strong>${escapeHtml(group.name)}</strong>
-                <span class="subtle">${escapeHtml(group.trekName)} · ${formatDisplayDate(group.startDate)}${group.testModeEnabled ? " · Testing mode on" : ""}</span>
-                <div class="button-row">
-                  <a class="button" href="${links.adminHref}">Open Admin Setup</a>
-                  <a class="button ghost" href="${links.publicHref}">Open Public Camp</a>
-                </div>
-              </div>
-            `;
-          }).join("")}
-        </div>
+        <p class="subtle">Manage your trek-prep groups from this dashboard.</p>
+        <div class="details">${state.groups.map((group) => existingGroupMarkup(group)).join("")}</div>
       </section>
     `
-    : "";
+    : `<section class="card"><h2>Existing Groups</h2><div class="empty">No groups found yet.</div></section>`;
   app.innerHTML = `
     <section class="hero">
       ${logoMarkup()}
       <div class="hero-copy">
-        <p class="eyebrow">Organiser setup</p>
+        <p class="eyebrow">Organiser dashboard</p>
         <h1>Trek Prep Challenge</h1>
-        <p class="subtle">Create an independent 12-week prep camp with its own public participant link and private snapshot link.</p>
+        <p class="subtle">Create and manage independent 12-week prep camps with public participant links and private admin links.</p>
         <p class="subtle">${storageStatusText()}</p>
       </div>
     </section>
     ${missingLinkMessage}
+    ${existingGroups}
     <form class="card" id="createGroupForm">
-      <h2>Create Prep Group</h2>
+      <h2>Create New Prep Group</h2>
       <label class="field"><span>Group name</span><input name="name" required maxlength="80" placeholder="NITK85 Kishtwar Trek Group" /></label>
       <label class="field"><span>Trek name or description</span><input name="trekName" required maxlength="120" placeholder="Kishtwar high-altitude prep" /></label>
       <label class="field"><span>12-week Monday start date</span><input name="startDate" required type="date" /></label>
@@ -314,12 +342,49 @@ function renderAdminCreate(context) {
       <button class="button" type="submit">Create Group</button>
       <div id="createMessage"></div>
     </form>
-    ${existingGroups}
+    <div id="modalRoot"></div>
   `;
   document.getElementById("createGroupForm").addEventListener("submit", createGroup);
   bindCopyButtons();
+  bindResetButtons();
 }
 
+function existingGroupMarkup(group) {
+  const links = getGroupLinks(group);
+  const participants = getParticipantsForGroup(group.id);
+  const logs = state.logs.filter((log) => log.groupId === group.id);
+  const totals = state.totals.filter((total) => total.groupId === group.id);
+  const status = getProgramStatus(group.startDate, effectiveToday(group));
+  const adminActions = links.adminLink
+    ? `
+      <a class="button" href="${links.adminHref}">Open Admin Snapshot</a>
+      <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.adminLink)}">Copy Admin Link</button>
+      <button class="button ghost danger" type="button" data-reset-group="${escapeHtml(group.id)}">Reset This Group Data</button>
+    `
+    : `<div class="notice error">Admin link unavailable for this older group on this device. Open the original admin link once, then save settings to refresh it.</div>`;
+  return `
+    <div class="saved-group">
+      <div>
+        <strong>${escapeHtml(group.name)}</strong>
+        <span class="subtle">${escapeHtml(group.trekName)} · ${formatDisplayDate(group.startDate)}${group.testModeEnabled ? " · Testing mode on" : ""}</span>
+      </div>
+      <div class="details compact-details">
+        <div class="detail-row"><span>Current week status</span><strong>${escapeHtml(status.label)}</strong></div>
+        <div class="detail-row"><span>Participants</span><strong>${participants.length}</strong></div>
+        <div class="detail-row"><span>Log entries</span><strong>${logs.length}</strong></div>
+        <div class="detail-row"><span>Weekly totals</span><strong>${totals.length}</strong></div>
+      </div>
+      <strong>Public participant link</strong>
+      <div class="link-box">${links.publicLink}</div>
+      ${links.adminLink ? `<strong>Admin/manage link</strong><div class="link-box">${links.adminLink}</div>` : ""}
+      <div class="button-row">
+        <a class="button secondary" href="${links.publicHref}">Open Public Camp</a>
+        <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.publicLink)}">Copy Public Link</button>
+        ${adminActions}
+      </div>
+    </div>
+  `;
+}
 async function createGroup(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -345,30 +410,38 @@ async function createGroup(event) {
   await saveRecord(CLOUD_COLLECTIONS.groups, group);
   await saveAdminToken(group);
   const links = getGroupLinks(group);
-  message.innerHTML = `
-    <div class="notice">Group created. Share the public link with participants and keep the admin link private.</div>
-    <div class="details">
-      <strong>Public group link</strong>
-      <div class="link-box">${links.publicLink}</div>
-      <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.publicLink)}">Copy public link</button>
-      <strong>Admin link</strong>
-      <div class="link-box">${links.adminLink}</div>
-      <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.adminLink)}">Copy admin link</button>
-      <a class="button secondary" href="${links.publicHref}">Open public camp</a>
-      <a class="button" href="${links.adminHref}">Open admin snapshot</a>
-    </div>
-  `;
-  bindCopyButtons();
+  render();
+  setTimeout(() => {
+    const freshMessage = document.getElementById("createMessage");
+    if (!freshMessage) return;
+    freshMessage.innerHTML = `
+      <div class="notice">Group created. Share the public link with participants and keep the admin link private.</div>
+      <div class="details">
+        <strong>Public group link</strong>
+        <div class="link-box">${links.publicLink}</div>
+        <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.publicLink)}">Copy public link</button>
+        <strong>Admin link</strong>
+        <div class="link-box">${links.adminLink}</div>
+        <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.adminLink)}">Copy admin link</button>
+        <a class="button secondary" href="${links.publicHref}">Open public camp</a>
+        <a class="button" href="${links.adminHref}">Open admin snapshot</a>
+      </div>
+    `;
+    bindCopyButtons();
+  }, 0);
 }
 
 function getGroupLinks(group) {
   const base = `${location.origin}${location.pathname}`;
-  const adminToken = group.adminToken || params().get("admin") || "";
+  const adminToken = group.adminToken || getAdminRoute().token || "";
+  const adminQuery = adminToken
+    ? `?admin=1&group=${encodeURIComponent(group.id)}&token=${encodeURIComponent(adminToken)}`
+    : "";
   return {
     publicHref: `?g=${encodeURIComponent(group.publicSlug)}`,
-    adminHref: `?admin=${encodeURIComponent(adminToken)}`,
+    adminHref: adminQuery,
     publicLink: `${base}?g=${encodeURIComponent(group.publicSlug)}`,
-    adminLink: `${base}?admin=${encodeURIComponent(adminToken)}`,
+    adminLink: adminQuery ? `${base}${adminQuery}` : "",
   };
 }
 
@@ -527,16 +600,17 @@ function renderAdminSetup(context, programStatus) {
         <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.adminLink)}">Copy admin link</button>
       </div>
     </section>
-    <section class="card">
-      <h2>Reset Test Data</h2>
-      <p class="subtle">Clears only this group's roster, logs, and weekly totals. Group settings and share links stay the same.</p>
-      <button class="button ghost danger" type="button" id="resetGroupData">Reset This Group's Data</button>
+    <section class="card danger-zone">
+      <h2>Danger Zone</h2>
+      <p class="subtle">Use this only before launching a group or if you want to clear test entries. This will remove all participants, logs, and weekly totals for this group. The group link and start date will remain unchanged.</p>
+      <button class="button danger" type="button" data-reset-group="${escapeHtml(context.group.id)}">Reset This Group Data</button>
       <div id="resetMessage"></div>
     </section>
+    <div id="modalRoot"></div>
   `;
   document.getElementById("adminSettingsForm").addEventListener("submit", saveAdminSettings);
-  document.getElementById("resetGroupData").addEventListener("click", resetGroupData);
   bindCopyButtons();
+  bindResetButtons();
 }
 
 function storageStatusText() {
@@ -582,28 +656,123 @@ async function saveAdminSettings(event) {
   }, 0);
 }
 
-async function resetGroupData() {
-  const context = currentContext();
-  if (!confirm("Reset this group's roster, logs, and weekly totals? Group settings and links will stay unchanged.")) return;
-  const removedParticipants = state.participants.filter((participant) => participant.groupId === context.group.id);
-  const removedLogs = state.logs.filter((log) => log.groupId === context.group.id);
-  const removedTotals = state.totals.filter((total) => total.groupId === context.group.id);
-  state.participants = state.participants.filter((participant) => participant.groupId !== context.group.id);
-  state.logs = state.logs.filter((log) => log.groupId !== context.group.id);
-  state.totals = state.totals.filter((total) => total.groupId !== context.group.id);
-  localStorage.removeItem(`trek-prep-participant-${context.group.id}`);
-  selectedTrailWeek = null;
-  saveState();
-  await Promise.all([
-    deleteRecords(CLOUD_COLLECTIONS.participants, removedParticipants),
-    deleteRecords(CLOUD_COLLECTIONS.logs, removedLogs),
-    deleteRecords(CLOUD_COLLECTIONS.totals, removedTotals),
-  ]);
-  render();
-  setTimeout(() => {
-    const message = document.getElementById("resetMessage");
-    if (message) message.innerHTML = `<div class="notice">This group's test data has been reset.</div>`;
-  }, 0);
+function bindResetButtons() {
+  app.querySelectorAll("[data-reset-group]").forEach((button) => {
+    button.addEventListener("click", () => openResetWarning(button.dataset.resetGroup));
+  });
+}
+
+function getResetCounts(groupId) {
+  return {
+    participants: state.participants.filter((participant) => participant.groupId === groupId).length,
+    logs: state.logs.filter((log) => log.groupId === groupId).length,
+    totals: state.totals.filter((total) => total.groupId === groupId).length,
+  };
+}
+
+function getModalRoot() {
+  let root = document.getElementById("modalRoot");
+  if (!root) {
+    root = document.createElement("div");
+    root.id = "modalRoot";
+    app.appendChild(root);
+  }
+  return root;
+}
+
+function closeResetModal() {
+  getModalRoot().innerHTML = "";
+}
+
+function openResetWarning(groupId) {
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  const counts = getResetCounts(groupId);
+  getModalRoot().innerHTML = `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="resetTitle">
+        <h2 id="resetTitle">Reset group data?</h2>
+        <p>This will permanently delete all participants, log entries, and weekly totals for this group only. The group itself, start date, public link, and admin link will remain unchanged. Other groups will not be affected.</p>
+        <div class="details">
+          <div class="detail-row"><span>Selected group</span><strong>${escapeHtml(group.name)}</strong></div>
+          <div class="detail-row"><span>Participants to delete</span><strong>${counts.participants}</strong></div>
+          <div class="detail-row"><span>Log entries to delete</span><strong>${counts.logs}</strong></div>
+          <div class="detail-row"><span>Weekly totals to delete</span><strong>${counts.totals}</strong></div>
+        </div>
+        <div class="button-row modal-actions">
+          <button class="button ghost" type="button" id="cancelReset">Cancel</button>
+          <button class="button danger" type="button" id="continueReset">Continue</button>
+        </div>
+      </section>
+    </div>
+  `;
+  document.getElementById("cancelReset").addEventListener("click", closeResetModal);
+  document.getElementById("continueReset").addEventListener("click", () => openResetConfirm(groupId));
+}
+
+function openResetConfirm(groupId) {
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  const counts = getResetCounts(groupId);
+  getModalRoot().innerHTML = `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirmResetTitle">
+        <h2 id="confirmResetTitle">Type RESET to confirm</h2>
+        <p class="subtle">This will clear ${counts.participants} participants, ${counts.logs} log entries, and ${counts.totals} weekly total records for ${escapeHtml(group.name)}.</p>
+        <label class="field"><span>Confirmation</span><input id="resetConfirmInput" autocomplete="off" placeholder="RESET" /></label>
+        <div id="resetModalMessage"></div>
+        <div class="button-row modal-actions">
+          <button class="button ghost" type="button" id="cancelReset">Cancel</button>
+          <button class="button danger" type="button" id="confirmReset" disabled>Confirm Reset</button>
+        </div>
+      </section>
+    </div>
+  `;
+  const input = document.getElementById("resetConfirmInput");
+  const confirmButton = document.getElementById("confirmReset");
+  document.getElementById("cancelReset").addEventListener("click", closeResetModal);
+  input.addEventListener("input", () => {
+    confirmButton.disabled = input.value !== "RESET";
+  });
+  confirmButton.addEventListener("click", () => resetGroupData(groupId));
+  input.focus();
+}
+
+async function resetGroupData(groupId) {
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  const modalMessage = document.getElementById("resetModalMessage");
+  const confirmButton = document.getElementById("confirmReset");
+  if (confirmButton) {
+    confirmButton.disabled = true;
+    confirmButton.textContent = "Resetting...";
+  }
+  try {
+    const removedLogs = state.logs.filter((log) => log.groupId === groupId);
+    const removedTotals = state.totals.filter((total) => total.groupId === groupId);
+    const removedParticipants = state.participants.filter((participant) => participant.groupId === groupId);
+    await deleteRecords(CLOUD_COLLECTIONS.logs, removedLogs);
+    await deleteRecords(CLOUD_COLLECTIONS.totals, removedTotals);
+    await deleteRecords(CLOUD_COLLECTIONS.participants, removedParticipants);
+    state.logs = state.logs.filter((log) => log.groupId !== groupId);
+    state.totals = state.totals.filter((total) => total.groupId !== groupId);
+    state.participants = state.participants.filter((participant) => participant.groupId !== groupId);
+    localStorage.removeItem(`trek-prep-participant-${groupId}`);
+    selectedTrailWeek = null;
+    saveState();
+    closeResetModal();
+    render();
+    setTimeout(() => {
+      const message = document.getElementById("resetMessage") || document.getElementById("createMessage");
+      if (message) message.innerHTML = `<div class="notice">Group data reset successfully. This group is ready for launch.</div>`;
+    }, 0);
+  } catch (error) {
+    if (modalMessage) modalMessage.innerHTML = `<div class="notice error">${escapeHtml(error.message || "Reset failed. Please try again.")}</div>`;
+    if (confirmButton) {
+      confirmButton.disabled = false;
+      confirmButton.textContent = "Confirm Reset";
+    }
+  }
 }
 
 function logCardMarkup(context, programStatus) {
@@ -620,7 +789,7 @@ function logCardMarkup(context, programStatus) {
   return `
     <form class="card" id="logForm">
       <h2>Log This Week</h2>
-      <p class="subtle">Progress vs Baseline Target · ${daysLeft} ${daysLeft === 1 ? "day" : "days"} left this week</p>
+      <p class="subtle">Progress vs Baseline Target Â· ${daysLeft} ${daysLeft === 1 ? "day" : "days"} left this week</p>
       ${ACTIVITY_KEYS.map((key) => activityRowMarkup(key, totals, targets)).join("")}
       <button class="button" id="saveLogButton" type="submit">Save This Log</button>
       <div id="logMessage"></div>
@@ -640,7 +809,7 @@ function activityRowMarkup(key, totals, targets) {
       <div class="activity-head">
         <div>
           <div class="activity-title"><span class="glyph">${activityGlyph(meta.icon)}</span>${meta.label}</div>
-          <div class="subtle">${numberFormat(actual)} ${meta.unit} logged · baseline ${numberFormat(baseline)} · stretch ${numberFormat(stretch)}</div>
+          <div class="subtle">${numberFormat(actual)} ${meta.unit} logged Â· baseline ${numberFormat(baseline)} Â· stretch ${numberFormat(stretch)}</div>
         </div>
         <strong>${Math.round(percent)}%</strong>
       </div>
@@ -717,7 +886,7 @@ function renderGroupStatus(context, programStatus) {
   view.innerHTML = `
     <section class="card">
       <h2>12-Week Trails</h2>
-      <p class="subtle">Alphabetical · no ranking</p>
+      <p class="subtle">Alphabetical Â· no ranking</p>
       ${participants.length ? participants.map((p) => participantTrailMarkup(context.group, p, programStatus.weekNumber)).join("") : `<div class="empty">No one has joined this camp yet.</div>`}
     </section>
   `;
@@ -828,18 +997,18 @@ ${loggedCount}/${total} logged some activity this week.
 ${fullBaselineCount} hit full baseline.
 
 This week's trail:
-• Green Rabbit: ${distribution.GREEN_RABBIT}
-• Green Tortoise: ${distribution.GREEN_TORTOISE}
-• Yellow Rabbit: ${distribution.YELLOW_RABBIT}
-• Yellow Tortoise: ${distribution.YELLOW_TORTOISE}
-• Grey - showed up below baseline: ${distribution.GREY_CIRCLE}
-• Red - no activity logged: ${distribution.RED_CIRCLE}
+â€¢ Green Rabbit: ${distribution.GREEN_RABBIT}
+â€¢ Green Tortoise: ${distribution.GREEN_TORTOISE}
+â€¢ Yellow Rabbit: ${distribution.YELLOW_RABBIT}
+â€¢ Yellow Tortoise: ${distribution.YELLOW_TORTOISE}
+â€¢ Grey - showed up below baseline: ${distribution.GREY_CIRCLE}
+â€¢ Red - no activity logged: ${distribution.RED_CIRCLE}
 
 Group average vs baseline:
-• Steps: ${Math.round(averages.steps)}%
-• Stairs: ${Math.round(averages.stairs)}%
-• Yoga: ${Math.round(averages.yoga)}%
-• Pranayama: ${Math.round(averages.pranayama)}%
+â€¢ Steps: ${Math.round(averages.steps)}%
+â€¢ Stairs: ${Math.round(averages.stairs)}%
+â€¢ Yoga: ${Math.round(averages.yoga)}%
+â€¢ Pranayama: ${Math.round(averages.pranayama)}%
 
 Good work, buddies. Keep showing up - consistency beats intensity.`;
 }
@@ -927,8 +1096,8 @@ function trailSummary(group, participantId, currentWeek) {
     }
   }
   const currentStatus = statusLabels[getWeeklyTotal(group.id, participantId, currentWeek).computedStatus];
-  const completedText = completed > 0 ? `W1-W${completed} complete · ` : "";
-  return `${completedText}W${currentWeek} in progress · Current week ${currentStatus} · ${green}/${currentWeek} green so far`;
+  const completedText = completed > 0 ? `W1-W${completed} complete Â· ` : "";
+  return `${completedText}W${currentWeek} in progress Â· Current week ${currentStatus} Â· ${green}/${currentWeek} green so far`;
 }
 
 function daysLeftThisWeek(group, weekNumber) {
@@ -1020,9 +1189,9 @@ function legendItem(status, description) {
 
 function activityGlyph(name) {
   const glyphs = {
-    shoe: "↗",
-    stairs: "▥",
-    lotus: "◠",
+    shoe: "â†—",
+    stairs: "â–¥",
+    lotus: "â— ",
     breath: "~",
   };
   return glyphs[name];

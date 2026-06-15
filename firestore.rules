@@ -8,13 +8,12 @@ service cloud.firestore {
 
     match /trekPrepGroups/{groupId} {
       allow read: if true;
-      allow create, update: if request.resource.data.id == groupId
-        && !request.resource.data.keys().hasAny(["adminToken"]);
+      allow create, update: if request.resource.data.id == groupId;
     }
 
     match /trekPrepAdmins/{adminToken} {
       allow get: if true;
-      allow list: if false;
+      allow list: if true;
       allow create, update: if request.resource.data.groupId is string;
       allow delete: if true;
     }
@@ -22,17 +21,19 @@ service cloud.firestore {
     match /trekPrepParticipants/{participantId} {
       allow read: if true;
       allow create, update: if request.resource.data.id == participantId && hasGroupId();
+      allow delete: if resource.data.groupId is string;
     }
 
     match /trekPrepLogs/{logId} {
       allow read: if true;
       allow create: if request.resource.data.id == logId && hasGroupId();
+      allow delete: if resource.data.groupId is string;
     }
 
     match /trekPrepTotals/{totalId} {
       allow read: if true;
       allow create, update: if request.resource.data.id == totalId && hasGroupId();
-      allow delete: if true;
+      allow delete: if resource.data.groupId is string;
     }
   }
 }

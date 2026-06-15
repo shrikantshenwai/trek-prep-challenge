@@ -252,8 +252,18 @@ textarea {
 }
 
 .button.danger {
-  color: var(--red);
+  background: var(--red);
+  color: white;
   border-color: rgba(201, 92, 73, 0.55);
+}
+
+.button.ghost.danger {
+  background: transparent;
+  color: var(--red);
+}
+
+.button.danger:hover {
+  background: #a84636;
 }
 
 .button:disabled {
@@ -468,6 +478,40 @@ textarea {
   text-align: center;
   padding: 20px 10px;
   color: var(--muted);
+}
+
+.compact-details {
+  margin-top: 0;
+}
+
+.danger-zone {
+  border-color: rgba(201, 92, 73, 0.65);
+  background: #fff5ef;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(46, 58, 51, 0.48);
+  padding: 18px;
+}
+
+.modal-card {
+  width: min(100%, 460px);
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+  background: var(--paper-strong);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.modal-actions {
+  margin-top: 16px;
 }
 
 @media (min-width: 760px) {
