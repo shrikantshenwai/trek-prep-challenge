@@ -276,6 +276,12 @@ textarea {
   gap: 10px;
 }
 
+.compact-button {
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 0.82rem;
+}
+
 .notice {
   border-left: 4px solid var(--sage);
   padding: 10px 12px;
@@ -432,6 +438,32 @@ textarea {
 .participant-name {
   margin-bottom: 8px;
   font-weight: 900;
+}
+
+.roster-claim-list,
+.roster-admin-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.roster-claim-button {
+  justify-content: flex-start;
+  min-height: 42px;
+}
+
+.roster-admin-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  border-top: 1px solid rgba(217, 205, 184, 0.8);
+  padding-top: 8px;
+}
+
+.roster-admin-row:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .snapshot-grid {

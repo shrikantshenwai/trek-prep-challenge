@@ -277,6 +277,31 @@ function findReturningParticipant(groupId) {
   return state.participants.find((item) => item.groupId === groupId && (item.id === savedId || item.deviceKey === deviceKey));
 }
 
+function normalizeParticipantName(name) {
+  return String(name || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function findParticipantsByName(groupId, displayName) {
+  const normalized = normalizeParticipantName(displayName);
+  if (!normalized) return [];
+  return state.participants.filter(
+    (participant) => participant.groupId === groupId && normalizeParticipantName(participant.displayName) === normalized
+  );
+}
+
+function choosePrimaryParticipant(participants) {
+  return [...participants].sort((left, right) => {
+    const leftStats = getParticipantStats(left.id);
+    const rightStats = getParticipantStats(right.id);
+    if (rightStats.logs !== leftStats.logs) return rightStats.logs - leftStats.logs;
+    if (rightStats.activityTotal !== leftStats.activityTotal) return rightStats.activityTotal - leftStats.activityTotal;
+    return String(left.createdAt || "").localeCompare(String(right.createdAt || ""));
+  })[0];
+}
+
 function getDefaultSelectedWeek() {
   return 1;
 }
@@ -457,6 +482,22 @@ function getAdminDashboardLink() {
 
 function renderJoin(context, programStatus) {
   const participants = getParticipantsForGroup(context.group.id);
+  const participantButtons = participants.length
+    ? `
+      <div class="roster-claim-list">
+        <p class="subtle">Already joined? Continue as your roster name instead of joining again.</p>
+        ${participants
+          .map(
+            (participant) => `
+              <button class="button ghost roster-claim-button" type="button" data-claim-participant="${escapeHtml(participant.id)}">
+                Continue as ${escapeHtml(participant.displayName)}
+              </button>
+            `
+          )
+          .join("")}
+      </div>
+    `
+    : "";
   app.innerHTML = `
     <section class="hero">
       ${logoMarkup()}
@@ -479,6 +520,7 @@ function renderJoin(context, programStatus) {
       <label class="field"><span>Your display name</span><input name="displayName" required maxlength="50" autocomplete="name" placeholder="Rajiv" /></label>
       <button class="button" type="submit">Join Camp</button>
       ${participants.length ? `<p class="subtle">Already on roster: ${participants.slice(0, 5).map((p) => escapeHtml(p.displayName)).join(", ")}${participants.length > 5 ? "..." : ""}</p>` : ""}
+      ${participantButtons}
       <div id="joinMessage"></div>
     </form>
     <section class="card">
@@ -487,6 +529,7 @@ function renderJoin(context, programStatus) {
     </section>
   `;
   document.getElementById("joinForm").addEventListener("submit", joinGroup);
+  bindClaimParticipantButtons();
 }
 
 async function joinGroup(event) {
@@ -498,6 +541,11 @@ async function joinGroup(event) {
     message.innerHTML = `<div class="notice error">Please enter a name up to 50 characters.</div>`;
     return;
   }
+  const existingMatches = findParticipantsByName(context.group.id, displayName);
+  if (existingMatches.length) {
+    await claimParticipant(choosePrimaryParticipant(existingMatches).id);
+    return;
+  }
   const participant = {
     id: makeId("participant"),
     groupId: context.group.id,
@@ -507,6 +555,34 @@ async function joinGroup(event) {
     lastSeenAt: new Date().toISOString(),
   };
   state.participants.push(participant);
+  localStorage.setItem(`trek-prep-participant-${context.group.id}`, participant.id);
+  ensureTotalsForParticipant(context.group, participant.id);
+  await saveRecord(CLOUD_COLLECTIONS.participants, participant);
+  await Promise.all(
+    state.totals
+      .filter((total) => total.groupId === context.group.id && total.participantId === participant.id)
+      .map((total) => saveRecord(CLOUD_COLLECTIONS.totals, total))
+  );
+  activeTab = "my";
+  render();
+}
+
+function bindClaimParticipantButtons() {
+  app.querySelectorAll("[data-claim-participant]").forEach((button) => {
+    button.addEventListener("click", () => claimParticipant(button.dataset.claimParticipant));
+  });
+}
+
+async function claimParticipant(participantId) {
+  const context = currentContext();
+  const participant = state.participants.find((item) => item.groupId === context.group.id && item.id === participantId);
+  const message = document.getElementById("joinMessage");
+  if (!participant) {
+    if (message) message.innerHTML = `<div class="notice error">That roster name was not found. Please refresh and try again.</div>`;
+    return;
+  }
+  participant.deviceKey = getDeviceKey();
+  participant.lastSeenAt = new Date().toISOString();
   localStorage.setItem(`trek-prep-participant-${context.group.id}`, participant.id);
   ensureTotalsForParticipant(context.group, participant.id);
   await saveRecord(CLOUD_COLLECTIONS.participants, participant);
@@ -579,6 +655,7 @@ function renderMyStatus(context, programStatus) {
 function renderAdminSetup(context, programStatus) {
   const view = document.getElementById("view");
   const links = getGroupLinks(context.group);
+  const rosterCleanup = rosterCleanupMarkup(context.group);
   view.innerHTML = `
     <section class="card">
       <h2>Group Settings</h2>
@@ -610,6 +687,7 @@ function renderAdminSetup(context, programStatus) {
         <button class="button ghost" type="button" data-copy="${encodeURIComponent(links.adminLink)}">Copy Admin Link</button>
       </div>
     </section>
+    ${rosterCleanup}
     <section class="card danger-zone">
       <h2>Danger Zone</h2>
       <p class="subtle">Use this only before launching a group or if you want to clear test entries. This will remove all participants, logs, and weekly totals for this group. The group link and start date will remain unchanged.</p>
@@ -621,6 +699,7 @@ function renderAdminSetup(context, programStatus) {
   document.getElementById("adminSettingsForm").addEventListener("submit", saveAdminSettings);
   bindCopyButtons();
   bindResetButtons();
+  bindRosterCleanupButtons();
 }
 
 function storageStatusText() {
@@ -782,6 +861,189 @@ async function resetGroupData(groupId) {
       confirmButton.disabled = false;
       confirmButton.textContent = "Confirm Reset";
     }
+  }
+}
+
+function rosterCleanupMarkup(group) {
+  const participants = getParticipantsForGroup(group.id);
+  const duplicateGroups = getDuplicateParticipantGroups(group.id);
+  const emptyParticipants = participants.filter((participant) => isEmptyParticipant(participant.id));
+  if (!participants.length) return "";
+  return `
+    <section class="card">
+      <h2>Roster Cleanup</h2>
+      <p class="subtle">Fix duplicate names without clearing the real activity people already logged.</p>
+      ${
+        duplicateGroups.length
+          ? `
+            <div class="notice">
+              ${duplicateGroups.length} duplicate name ${duplicateGroups.length === 1 ? "set" : "sets"} found. Merge keeps the row with the most logged activity and moves the duplicate data into it.
+            </div>
+            <button class="button" type="button" data-merge-duplicates="${escapeHtml(group.id)}">Merge Same-Name Duplicates</button>
+          `
+          : `<div class="notice">No same-name duplicates found.</div>`
+      }
+      <div class="roster-admin-list">
+        ${participants.map((participant) => rosterAdminRowMarkup(participant)).join("")}
+      </div>
+      <div id="rosterMessage"></div>
+    </section>
+  `;
+}
+
+function rosterAdminRowMarkup(participant) {
+  const stats = getParticipantStats(participant.id);
+  const removable = stats.logs === 0 && stats.activityTotal === 0;
+  return `
+    <div class="roster-admin-row">
+      <div>
+        <strong>${escapeHtml(participant.displayName)}</strong>
+        <p class="subtle">${stats.logs} logs · ${stats.nonZeroWeeks} active weeks</p>
+      </div>
+      ${
+        removable
+          ? `<button class="button ghost danger compact-button" type="button" data-remove-empty-participant="${escapeHtml(participant.id)}">Remove Empty</button>`
+          : `<span class="pill">Keep data</span>`
+      }
+    </div>
+  `;
+}
+
+function bindRosterCleanupButtons() {
+  app.querySelectorAll("[data-merge-duplicates]").forEach((button) => {
+    button.addEventListener("click", () => mergeSameNameDuplicates(button.dataset.mergeDuplicates));
+  });
+  app.querySelectorAll("[data-remove-empty-participant]").forEach((button) => {
+    button.addEventListener("click", () => removeEmptyParticipant(button.dataset.removeEmptyParticipant));
+  });
+}
+
+function getDuplicateParticipantGroups(groupId) {
+  const byName = new Map();
+  state.participants
+    .filter((participant) => participant.groupId === groupId)
+    .forEach((participant) => {
+      const name = normalizeParticipantName(participant.displayName);
+      if (!name) return;
+      if (!byName.has(name)) byName.set(name, []);
+      byName.get(name).push(participant);
+    });
+  return [...byName.values()].filter((participants) => participants.length > 1);
+}
+
+function getParticipantStats(participantId) {
+  const logs = state.logs.filter((log) => log.participantId === participantId);
+  const totals = state.totals.filter((total) => total.participantId === participantId);
+  const activityTotal = totals.reduce(
+    (sum, total) => sum + ACTIVITY_KEYS.reduce((activitySum, key) => activitySum + Number(total[key] || 0), 0),
+    0
+  );
+  const nonZeroWeeks = totals.filter((total) => ACTIVITY_KEYS.some((key) => Number(total[key] || 0) > 0)).length;
+  return { logs: logs.length, activityTotal, nonZeroWeeks };
+}
+
+function isEmptyParticipant(participantId) {
+  const stats = getParticipantStats(participantId);
+  return stats.logs === 0 && stats.activityTotal === 0;
+}
+
+async function mergeSameNameDuplicates(groupId) {
+  const message = document.getElementById("rosterMessage");
+  const duplicateGroups = getDuplicateParticipantGroups(groupId);
+  if (!duplicateGroups.length) {
+    if (message) message.innerHTML = `<div class="notice">No duplicate names to merge.</div>`;
+    return;
+  }
+  try {
+    for (const duplicateGroup of duplicateGroups) {
+      const primary = choosePrimaryParticipant(duplicateGroup);
+      const duplicates = duplicateGroup.filter((participant) => participant.id !== primary.id);
+      for (const duplicate of duplicates) {
+        await mergeParticipantInto(groupId, duplicate.id, primary.id);
+      }
+    }
+    saveState();
+    render();
+    setTimeout(() => {
+      const freshMessage = document.getElementById("rosterMessage");
+      if (freshMessage) freshMessage.innerHTML = `<div class="notice">Duplicate roster names merged. Existing logs were kept.</div>`;
+    }, 0);
+  } catch (error) {
+    if (message) message.innerHTML = `<div class="notice error">${escapeHtml(error.message || "Merge failed. Please try again.")}</div>`;
+  }
+}
+
+async function mergeParticipantInto(groupId, fromParticipantId, toParticipantId) {
+  if (fromParticipantId === toParticipantId) return;
+  const group = state.groups.find((item) => item.id === groupId);
+  const fromParticipant = state.participants.find((participant) => participant.id === fromParticipantId && participant.groupId === groupId);
+  const toParticipant = state.participants.find((participant) => participant.id === toParticipantId && participant.groupId === groupId);
+  if (!group || !fromParticipant || !toParticipant) throw new Error("Could not find both roster entries for merge.");
+
+  const movedLogs = state.logs.filter((log) => log.groupId === groupId && log.participantId === fromParticipantId);
+  if (movedLogs.length) await deleteRecords(CLOUD_COLLECTIONS.logs, movedLogs);
+  movedLogs.forEach((log) => {
+    log.participantId = toParticipantId;
+  });
+  await Promise.all(movedLogs.map((log) => saveRecord(CLOUD_COLLECTIONS.logs, log)));
+
+  const sourceTotals = state.totals.filter((total) => total.groupId === groupId && total.participantId === fromParticipantId);
+  const totalsToDelete = [];
+  const totalsToSave = [];
+  sourceTotals.forEach((sourceTotal) => {
+    const targetTotal = state.totals.find(
+      (total) => total.groupId === groupId && total.participantId === toParticipantId && total.weekNumber === sourceTotal.weekNumber
+    );
+    if (targetTotal) {
+      ACTIVITY_KEYS.forEach((key) => {
+        targetTotal[key] = Number(targetTotal[key] || 0) + Number(sourceTotal[key] || 0);
+      });
+      updateWeeklyComputedFields(group, targetTotal);
+      totalsToSave.push(targetTotal);
+      totalsToDelete.push(sourceTotal);
+    } else {
+      sourceTotal.participantId = toParticipantId;
+      updateWeeklyComputedFields(group, sourceTotal);
+      totalsToSave.push(sourceTotal);
+    }
+  });
+  if (totalsToDelete.length) await deleteRecords(CLOUD_COLLECTIONS.totals, totalsToDelete);
+  state.totals = state.totals.filter((total) => !totalsToDelete.some((deleted) => deleted.id === total.id));
+  await Promise.all(totalsToSave.map((total) => saveRecord(CLOUD_COLLECTIONS.totals, total)));
+
+  await deleteRecords(CLOUD_COLLECTIONS.participants, [fromParticipant]);
+  state.participants = state.participants.filter((participant) => participant.id !== fromParticipantId);
+  if (localStorage.getItem(`trek-prep-participant-${groupId}`) === fromParticipantId) {
+    localStorage.setItem(`trek-prep-participant-${groupId}`, toParticipantId);
+  }
+}
+
+async function removeEmptyParticipant(participantId) {
+  const participant = state.participants.find((item) => item.id === participantId);
+  const message = document.getElementById("rosterMessage");
+  if (!participant) return;
+  if (!isEmptyParticipant(participantId)) {
+    if (message) message.innerHTML = `<div class="notice error">This roster entry has activity. Merge it instead of removing it.</div>`;
+    return;
+  }
+  if (!confirm(`Remove empty roster entry for ${participant.displayName}?`)) return;
+  try {
+    const emptyTotals = state.totals.filter((total) => total.participantId === participantId);
+    await deleteRecords(CLOUD_COLLECTIONS.totals, emptyTotals);
+    await deleteRecords(CLOUD_COLLECTIONS.participants, [participant]);
+    state.totals = state.totals.filter((total) => total.participantId !== participantId);
+    state.participants = state.participants.filter((item) => item.id !== participantId);
+    if (localStorage.getItem(`trek-prep-participant-${participant.groupId}`) === participantId) {
+      localStorage.removeItem(`trek-prep-participant-${participant.groupId}`);
+    }
+    saveState();
+    render();
+    setTimeout(() => {
+      const freshMessage = document.getElementById("rosterMessage");
+      if (freshMessage) freshMessage.innerHTML = `<div class="notice">Empty roster entry removed.</div>`;
+    }, 0);
+  } catch (error) {
+    if (message) message.innerHTML = `<div class="notice error">${escapeHtml(error.message || "Remove failed. Please try again.")}</div>`;
   }
 }
 
