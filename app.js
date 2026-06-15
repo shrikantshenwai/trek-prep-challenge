@@ -397,7 +397,7 @@ function existingGroupMarkup(group) {
     <div class="saved-group">
       <div>
         <strong>${escapeHtml(group.name)}</strong>
-        <span class="subtle">${escapeHtml(group.trekName)} · ${formatDisplayDate(group.startDate)}${group.testModeEnabled ? " · Testing mode on" : ""}</span>
+        <span class="subtle">${escapeHtml(group.trekName)} - ${formatDisplayDate(group.startDate)}${group.testModeEnabled ? " - Testing mode on" : ""}</span>
       </div>
       <div class="details compact-details">
         <div class="detail-row"><span>Current week status</span><strong>${escapeHtml(status.label)}</strong></div>
@@ -898,7 +898,7 @@ function rosterAdminRowMarkup(participant) {
     <div class="roster-admin-row">
       <div>
         <strong>${escapeHtml(participant.displayName)}</strong>
-        <p class="subtle">${stats.logs} logs · ${stats.nonZeroWeeks} active weeks</p>
+        <p class="subtle">${stats.logs} logs - ${stats.nonZeroWeeks} active weeks</p>
       </div>
       ${
         removable
@@ -1061,7 +1061,7 @@ function logCardMarkup(context, programStatus) {
   return `
     <form class="card" id="logForm">
       <h2>Log This Week</h2>
-      <p class="subtle">Progress vs Baseline Target Â· ${daysLeft} ${daysLeft === 1 ? "day" : "days"} left this week</p>
+      <p class="subtle">Progress vs Baseline Target - ${daysLeft} ${daysLeft === 1 ? "day" : "days"} left this week</p>
       ${ACTIVITY_KEYS.map((key) => activityRowMarkup(key, totals, targets)).join("")}
       <button class="button" id="saveLogButton" type="submit">Save This Log</button>
       <div id="logMessage"></div>
@@ -1081,7 +1081,7 @@ function activityRowMarkup(key, totals, targets) {
       <div class="activity-head">
         <div>
           <div class="activity-title"><span class="glyph">${activityGlyph(meta.icon)}</span>${meta.label}</div>
-          <div class="subtle">${numberFormat(actual)} ${meta.unit} logged Â· baseline ${numberFormat(baseline)} Â· stretch ${numberFormat(stretch)}</div>
+          <div class="subtle">${numberFormat(actual)} ${meta.unit} logged - baseline ${numberFormat(baseline)} - stretch ${numberFormat(stretch)}</div>
         </div>
         <strong>${Math.round(percent)}%</strong>
       </div>
@@ -1158,7 +1158,7 @@ function renderGroupStatus(context, programStatus) {
   view.innerHTML = `
     <section class="card">
       <h2>12-Week Trails</h2>
-      <p class="subtle">Alphabetical Â· no ranking</p>
+      <p class="subtle">Alphabetical - no ranking</p>
       ${participants.length ? participants.map((p) => participantTrailMarkup(context.group, p, programStatus.weekNumber)).join("") : `<div class="empty">No one has joined this camp yet.</div>`}
     </section>
   `;
@@ -1269,18 +1269,18 @@ ${loggedCount}/${total} logged some activity this week.
 ${fullBaselineCount} hit full baseline.
 
 This week's trail:
-â€¢ Green Rabbit: ${distribution.GREEN_RABBIT}
-â€¢ Green Tortoise: ${distribution.GREEN_TORTOISE}
-â€¢ Yellow Rabbit: ${distribution.YELLOW_RABBIT}
-â€¢ Yellow Tortoise: ${distribution.YELLOW_TORTOISE}
-â€¢ Grey - showed up below baseline: ${distribution.GREY_CIRCLE}
-â€¢ Red - no activity logged: ${distribution.RED_CIRCLE}
+- Green Rabbit: ${distribution.GREEN_RABBIT}
+- Green Tortoise: ${distribution.GREEN_TORTOISE}
+- Yellow Rabbit: ${distribution.YELLOW_RABBIT}
+- Yellow Tortoise: ${distribution.YELLOW_TORTOISE}
+- Grey - showed up below baseline: ${distribution.GREY_CIRCLE}
+- Red - no activity logged: ${distribution.RED_CIRCLE}
 
 Group average vs baseline:
-â€¢ Steps: ${Math.round(averages.steps)}%
-â€¢ Stairs: ${Math.round(averages.stairs)}%
-â€¢ Yoga: ${Math.round(averages.yoga)}%
-â€¢ Pranayama: ${Math.round(averages.pranayama)}%
+- Steps: ${Math.round(averages.steps)}%
+- Stairs: ${Math.round(averages.stairs)}%
+- Yoga: ${Math.round(averages.yoga)}%
+- Pranayama: ${Math.round(averages.pranayama)}%
 
 Good work, buddies. Keep showing up - consistency beats intensity.`;
 }
@@ -1368,8 +1368,8 @@ function trailSummary(group, participantId, currentWeek) {
     }
   }
   const currentStatus = statusLabels[getWeeklyTotal(group.id, participantId, currentWeek).computedStatus];
-  const completedText = completed > 0 ? `W1-W${completed} complete Â· ` : "";
-  return `${completedText}W${currentWeek} in progress Â· Current week ${currentStatus} Â· ${green}/${currentWeek} green so far`;
+  const completedText = completed > 0 ? `W1-W${completed} complete - ` : "";
+  return `${completedText}W${currentWeek} in progress - Current week ${currentStatus} - ${green}/${currentWeek} green so far`;
 }
 
 function daysLeftThisWeek(group, weekNumber) {
@@ -1461,9 +1461,9 @@ function legendItem(status, description) {
 
 function activityGlyph(name) {
   const glyphs = {
-    shoe: "â†—",
-    stairs: "â–¥",
-    lotus: "â— ",
+    shoe: "+",
+    stairs: "#",
+    lotus: "o",
     breath: "~",
   };
   return glyphs[name];
